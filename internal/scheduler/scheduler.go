@@ -2,7 +2,7 @@ package scheduler
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -39,20 +39,20 @@ func (s *Scheduler) AddTask(task Task) {
 
 // Start begins running all scheduled tasks
 func (s *Scheduler) Start() {
-	log.Println("Starting task scheduler...")
+	slog.Info("Starting task scheduler")
 	for _, task := range s.tasks {
 		s.wg.Add(1)
 		go s.runTask(task)
 	}
-	log.Printf("Task scheduler started with %d tasks", len(s.tasks))
+	slog.Info("Task scheduler started", "task_count", len(s.tasks))
 }
 
 // Stop gracefully stops all tasks
 func (s *Scheduler) Stop() {
-	log.Println("Stopping task scheduler...")
+	slog.Info("Stopping task scheduler")
 	s.cancel()
 	s.wg.Wait()
-	log.Println("Task scheduler stopped")
+	slog.Info("Task scheduler stopped")
 }
 
 // runTask runs a single task on its schedule
@@ -64,7 +64,7 @@ func (s *Scheduler) runTask(task Task) {
 
 	// Run immediately on start
 	if err := task.Run(s.ctx); err != nil {
-		log.Printf("Error running task %s: %v", task.Name(), err)
+		slog.Error("Error running task", "task", task.Name(), "error", err)
 	}
 
 	for {
@@ -73,7 +73,7 @@ func (s *Scheduler) runTask(task Task) {
 			return
 		case <-ticker.C:
 			if err := task.Run(s.ctx); err != nil {
-				log.Printf("Error running task %s: %v", task.Name(), err)
+				slog.Error("Error running task", "task", task.Name(), "error", err)
 			}
 		}
 	}

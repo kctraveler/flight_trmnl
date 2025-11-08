@@ -1,41 +1,70 @@
 package main
 
 import (
-	"fmt"
-	"log"
+	"flag"
+	"log/slog"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 
+	"flight_trmnl/internal/config"
 	"flight_trmnl/internal/daemon"
 )
 
-func main() {
-	// Configuration
-	cfg := daemon.Config{
-		DBPath:       "adsb_data.db",
-		BeastAddr:    "localhost:30005", // Beast format address
-		BatchSize:    100,                // Batch 100 messages before writing
-		BatchTimeout: 5,                  // Flush batch after 5 seconds
+func initLogger(cfg *config.Config) {
+	var logLevel slog.Level
+	switch cfg.Log.Level {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "info":
+		logLevel = slog.LevelInfo
+	case "warn":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	default:
+		logLevel = slog.LevelInfo
 	}
 
-	// Allow override via environment variables
-	if envDBPath := os.Getenv("ADSB_DB_PATH"); envDBPath != "" {
-		cfg.DBPath = envDBPath
+	opts := &slog.HandlerOptions{
+		Level: logLevel,
 	}
-	if envBeastAddr := os.Getenv("BEAST_ADDR"); envBeastAddr != "" {
-		cfg.BeastAddr = envBeastAddr
+
+	var handler slog.Handler
+	if cfg.Log.Format == "json" {
+		handler = slog.NewJSONHandler(os.Stdout, opts)
+	} else {
+		handler = slog.NewTextHandler(os.Stdout, opts)
 	}
-	if envBatchSize := os.Getenv("BATCH_SIZE"); envBatchSize != "" {
-		if batchSize, err := strconv.Atoi(envBatchSize); err == nil {
-			cfg.BatchSize = batchSize
-		}
+
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
+}
+
+func main() {
+	configPath := flag.String("config", "", "Path to config file (YAML)")
+	flag.Parse()
+
+	if *configPath != "" {
+		os.Setenv("FLIGHT_TRMNL_CONFIG_PATH", *configPath)
 	}
-	if envBatchTimeout := os.Getenv("BATCH_TIMEOUT"); envBatchTimeout != "" {
-		if batchTimeout, err := strconv.Atoi(envBatchTimeout); err == nil {
-			cfg.BatchTimeout = batchTimeout
-		}
+
+	cfg, err := config.Load()
+	if err != nil {
+		// Use basic logging for config errors since logger isn't initialized yet
+		// Initialize a basic logger just for this error
+		basicLogger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+		basicLogger.Error("Failed to load configuration", "error", err)
+		os.Exit(1)
+	}
+
+	initLogger(cfg)
+
+	daemonCfg := daemon.Config{
+		DBPath:       cfg.DBPath,
+		BeastAddr:    cfg.BeastAddr,
+		BatchSize:    cfg.BatchSize,
+		BatchTimeout: cfg.BatchTimeout,
 	}
 
 	// Setup signal handling for graceful shutdown
@@ -43,21 +72,24 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	// Create and start the daemon
-	d, err := daemon.New(cfg)
+	d, err := daemon.New(daemonCfg)
 	if err != nil {
-		log.Fatalf("Failed to create daemon: %v", err)
+		slog.Error("Failed to create daemon", "error", err)
+		os.Exit(1)
 	}
 
 	if err := d.Start(); err != nil {
-		log.Fatalf("Failed to start daemon: %v", err)
+		slog.Error("Failed to start daemon", "error", err)
+		os.Exit(1)
 	}
 
 	// Wait for interrupt signal
 	<-sigChan
-	fmt.Println("\nReceived interrupt signal, shutting down...")
+	slog.Info("Received interrupt signal, shutting down...")
 
 	// Stop the daemon gracefully
 	if err := d.Stop(); err != nil {
-		log.Fatalf("Failed to stop daemon: %v", err)
+		slog.Error("Failed to stop daemon", "error", err)
+		os.Exit(1)
 	}
 }

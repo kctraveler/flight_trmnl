@@ -2,8 +2,7 @@ package tasks
 
 import (
 	"context"
-	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -64,9 +63,9 @@ func (t *BeastCollectorTask) processMessages(ctx context.Context) {
 	flushBatch := func() {
 		if len(batch) > 0 {
 			if err := t.repo.InsertBeastMessagesBatch(batch); err != nil {
-				log.Printf("Error inserting batch of %d messages: %v", len(batch), err)
+				slog.Error("Error inserting batch of messages", "batch_size", len(batch), "error", err)
 			} else {
-				log.Printf("Inserted batch of %d Beast messages", len(batch))
+				slog.Info("Inserted batch of Beast messages", "batch_size", len(batch))
 			}
 			batch = batch[:0] // Reset slice but keep capacity
 		}

@@ -79,7 +79,7 @@ func determineMessageType(message []byte) string {
 	switch df {
 	case 0, 4, 5, 11:
 		return "surveillance"
-	case 16, 17, 18, 19, 20, 21:
+	case 16, 17, 18, 19:
 		return "extended_squitter"
 	case 20, 21:
 		return "comm_b"

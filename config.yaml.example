@@ -1,0 +1,24 @@
+# Flight Terminal Configuration File
+# Copy this file to config.yaml and customize as needed
+# Or use environment variables with FLIGHT_TRMNL_ prefix
+
+# Beast format server address
+beast_addr: "localhost:30005"
+
+# SQLite database file path
+db_path: "adsb_data.db"
+
+# Batch size for database writes (number of messages)
+batch_size: 100
+
+# Batch timeout in seconds (flush batch after this time even if not full)
+batch_timeout: 5
+
+# Logging configuration
+log:
+  # Log level: debug, info, warn, error
+  level: "info"
+  
+  # Log format: text (human-readable) or json (structured)
+  format: "text"
+

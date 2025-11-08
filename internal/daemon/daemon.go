@@ -3,7 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"flight_trmnl/internal/database"
@@ -71,13 +71,24 @@ func New(cfg Config) (*Daemon, error) {
 	sched.AddTask(beastCollector)
 
 	// Start Beast message streamer in background
+	// BeastClient now handles reconnection automatically, so we don't need to close the channel
+	// on error - it will keep trying to reconnect
 	go func() {
 		if err := beastClient.StreamMessages(ctx, messageChan); err != nil {
 			if ctx.Err() == nil { // Only log if not cancelled
-				log.Printf("Beast streamer error: %v", err)
+				slog.Error("Beast streamer stopped", "error", err)
 			}
 		}
-		close(messageChan)
+		// Only close channel if context was cancelled (graceful shutdown)
+		// Otherwise, BeastClient should keep reconnecting
+		select {
+		case <-ctx.Done():
+			close(messageChan)
+		default:
+			// StreamMessages returned but context not cancelled - this shouldn't happen
+			// but if it does, close the channel
+			close(messageChan)
+		}
 	}()
 
 	return &Daemon{
@@ -93,7 +104,7 @@ func New(cfg Config) (*Daemon, error) {
 
 // Start begins the daemon's main loop
 func (d *Daemon) Start() error {
-	log.Println("Starting daemon...")
+	slog.Info("Starting daemon")
 
 	// Start the scheduler
 	d.scheduler.Start()
@@ -104,13 +115,13 @@ func (d *Daemon) Start() error {
 		close(d.done)
 	}()
 
-	log.Println("Daemon started successfully")
+	slog.Info("Daemon started successfully")
 	return nil
 }
 
 // Stop gracefully stops the daemon
 func (d *Daemon) Stop() error {
-	log.Println("Stopping daemon...")
+	slog.Info("Stopping daemon")
 	d.cancel()
 	<-d.done
 
@@ -119,15 +130,15 @@ func (d *Daemon) Stop() error {
 
 	// Close Beast client
 	if err := d.beastClient.Close(); err != nil {
-		log.Printf("Error closing Beast client: %v", err)
+		slog.Error("Error closing Beast client", "error", err)
 	}
 
 	// Close database
 	if err := d.database.Close(); err != nil {
-		log.Printf("Error closing database: %v", err)
+		slog.Error("Error closing database", "error", err)
 	}
 
-	log.Println("Daemon stopped")
+	slog.Info("Daemon stopped")
 	return nil
 }
 
