@@ -71,8 +71,6 @@ func New(cfg Config) (*Daemon, error) {
 	sched.AddTask(beastCollector)
 
 	// Start Beast message streamer in background
-	// BeastClient now handles reconnection automatically, so we don't need to close the channel
-	// on error - it will keep trying to reconnect
 	go func() {
 		if err := beastClient.StreamMessages(ctx, messageChan); err != nil {
 			if ctx.Err() == nil { // Only log if not cancelled
@@ -102,11 +100,9 @@ func New(cfg Config) (*Daemon, error) {
 	}, nil
 }
 
-// Start begins the daemon's main loop
 func (d *Daemon) Start() error {
 	slog.Info("Starting daemon")
 
-	// Start the scheduler
 	d.scheduler.Start()
 
 	// Wait for context cancellation
@@ -125,15 +121,12 @@ func (d *Daemon) Stop() error {
 	d.cancel()
 	<-d.done
 
-	// Stop scheduler
 	d.scheduler.Stop()
 
-	// Close Beast client
 	if err := d.beastClient.Close(); err != nil {
 		slog.Error("Error closing Beast client", "error", err)
 	}
 
-	// Close database
 	if err := d.database.Close(); err != nil {
 		slog.Error("Error closing database", "error", err)
 	}
@@ -141,4 +134,3 @@ func (d *Daemon) Stop() error {
 	slog.Info("Daemon stopped")
 	return nil
 }
-

@@ -28,7 +28,7 @@ func Load() (*Config, error) {
 	v := viper.New()
 
 	// Set defaults
-	v.SetDefault("beast_addr", "localhost:30005")
+	v.SetDefault("beast_addr", "raspberrypi.local:30006")
 	v.SetDefault("db_path", "adsb_data.db")
 	v.SetDefault("batch_size", 100)
 	v.SetDefault("batch_timeout", 5)
@@ -125,4 +125,3 @@ func validate(cfg *Config) error {
 
 	return nil
 }
-
