@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"time"
@@ -8,51 +9,92 @@ import (
 
 // BeastMessage represents a Mode S message in Beast format
 type BeastMessage struct {
-	Timestamp   time.Time
-	SignalLevel uint8
-	Message     []byte // 14 bytes for 112-bit Mode S message
-	ICAO        string // Extracted ICAO address (first 3 bytes of message)
-	MessageType string // Type of message (position, identity, etc.)
+	Timestamp       time.Time
+	SignalLevel     uint8
+	Message         []byte // Variable length: BeastDataLenModeAC (Mode A/C), BeastDataLenModeSShort (Mode S short), or BeastDataLenModeSLong (Mode S long)
+	MessageTypeCode byte   // Beast message type: BeastTypeModeAC, BeastTypeModeSShort, or BeastTypeModeSLong
+	ICAO            string // Extracted ICAO address (first 3 bytes of message, for Mode S only)
+	MessageType     string // Type of message (position, identity, etc.)
 }
 
 // ParseBeastMessage parses a Beast format message
-// Beast format: 0x1a 0x31 [6-byte timestamp] [1-byte signal] [14-byte message]
+// Beast format: BeastStartByte [Type] [BeastTimestampLen-byte timestamp] [BeastSignalLen-byte signal] [variable-length message]
+// The 'Type' field indicates the message kind and determines message length:
+//   - BeastTypeModeAC (0x31): Mode A/C, expects BeastDataLenModeAC (2 bytes)
+//   - BeastTypeModeSShort (0x32): Mode S short, expects BeastDataLenModeSShort (7 bytes)
+//   - BeastTypeModeSLong (0x33): Mode S long, expects BeastDataLenModeSLong (14 bytes)
 func ParseBeastMessage(data []byte) (*BeastMessage, error) {
-	if len(data) < 22 {
-		return nil, fmt.Errorf("beast message too short: %d bytes", len(data))
+	if len(data) == 0 {
+		return nil, fmt.Errorf("beast message data must not be empty")
 	}
 
 	// Check for Beast format header
-	if data[0] != 0x1a || data[1] != 0x31 {
-		return nil, fmt.Errorf("invalid beast header: %02x %02x", data[0], data[1])
+	if data[0] != BeastStartByte {
+		return nil, fmt.Errorf("invalid beast header start byte: %02x", data[0])
 	}
 
-	// Extract timestamp (6 bytes, milliseconds since Unix epoch)
-	timestampMs := int64(data[2])<<40 | int64(data[3])<<32 | int64(data[4])<<24 |
-		int64(data[5])<<16 | int64(data[6])<<8 | int64(data[7])
-	timestamp := time.Unix(timestampMs/1000, (timestampMs%1000)*1000000)
+	// Check message type
+	typeByte := data[1]
+	expectedDataLen, err := GetBeastDataLen(typeByte)
+	if err != nil {
+		return nil, err
+	}
 
-	// Extract signal level (1 byte)
-	signalLevel := data[8]
+	// Check message size for type is correct
+	expectedTotalLen := BeastHeaderLen + BeastTimestampLen + BeastSignalLen + expectedDataLen
+	if len(data) != expectedTotalLen {
+		return nil, fmt.Errorf("beast message length mismatch: got %d bytes, expected %d for type %02x", len(data), expectedTotalLen, typeByte)
+	}
 
-	// Extract Mode S message (14 bytes)
-	message := make([]byte, 14)
-	copy(message, data[9:23])
+	// Extract timestamp (BeastTimestampLen bytes, big-endian, 12 MHz clock ticks)
+	// The timestamp is a 48-bit value stored in 6 bytes as big-endian
+	timestampOffset := BeastHeaderLen
+	timestampBytes := data[timestampOffset : timestampOffset+BeastTimestampLen]
 
-	// Extract ICAO address (first 3 bytes of message, but need to decode properly)
-	// Mode S messages have ICAO in the first 8 bits of the first byte
-	// and the remaining bits in subsequent bytes
-	icao := extractICAO(message)
+	// Convert 48-bit big-endian to int64 by padding with zeros and using binary.BigEndian
+	// We create an 8-byte buffer with 2 leading zeros, then read as uint64
+	var timestampBuf [8]byte
+	copy(timestampBuf[2:], timestampBytes)
+	timestampTicks := int64(binary.BigEndian.Uint64(timestampBuf[:]))
 
-	// Determine message type (simplified - could be enhanced)
-	messageType := determineMessageType(message)
+	// Convert from 12 MHz clock ticks to seconds
+	// Note: The timestamp is relative to the start of the sample block, not absolute Unix time
+	// For now, we'll use the current time as a reference, but ideally we'd track a base time
+	// Since we don't have the base time, we'll use current time as approximation
+	// In practice, you might want to track the first timestamp and use it as a base
+	timestampSeconds := float64(timestampTicks) / 12000000.0
+	timestamp := time.Now().Add(-time.Duration(timestampSeconds) * time.Second)
+
+	// Extract signal level (BeastSignalLen byte)
+	signalOffset := BeastHeaderLen + BeastTimestampLen
+	signalLevel := data[signalOffset]
+
+	// Extract message data
+	messageStart := BeastHeaderLen + BeastTimestampLen + BeastSignalLen
+	messageEnd := messageStart + expectedDataLen
+	message := make([]byte, expectedDataLen)
+	copy(message, data[messageStart:messageEnd])
+
+	// Extract ICAO address (only for Mode S messages, not Mode A/C)
+	var icao string
+	var messageType string
+	if IsModeS(typeByte) {
+		// Mode S message - extract ICAO and determine message type
+		icao = extractICAO(message)
+		messageType = determineMessageType(message)
+	} else {
+		// Mode A/C message
+		icao = ""
+		messageType = "mode_ac"
+	}
 
 	return &BeastMessage{
-		Timestamp:   timestamp,
-		SignalLevel: signalLevel,
-		Message:     message,
-		ICAO:        icao,
-		MessageType: messageType,
+		Timestamp:       timestamp,
+		SignalLevel:     signalLevel,
+		Message:         message,
+		MessageTypeCode: typeByte,
+		ICAO:            icao,
+		MessageType:     messageType,
 	}, nil
 }
 
@@ -92,4 +134,3 @@ func determineMessageType(message []byte) string {
 func (b *BeastMessage) Hex() string {
 	return hex.EncodeToString(b.Message)
 }
-

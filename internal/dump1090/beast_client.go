@@ -98,6 +98,45 @@ func (c *BeastClient) StreamMessages(ctx context.Context, messageChan chan<- *mo
 	}
 }
 
+// readByteWithEscape reads a byte, handling BeastStartByte escape sequences
+// If BeastStartByte is encountered, it reads the next byte. If that's also BeastStartByte, it's an escaped byte.
+// If it's not BeastStartByte, we're out of sync (unexpected new message start).
+func (c *BeastClient) readByteWithEscape() (byte, error) {
+	b, err := c.reader.ReadByte()
+	if err != nil {
+		return 0, err
+	}
+
+	if b == models.BeastStartByte {
+		// Check if this is an escape sequence
+		next, err := c.reader.Peek(1)
+		if err != nil {
+			return 0, err
+		}
+		if next[0] == models.BeastStartByte {
+			// Escaped BeastStartByte, consume it
+			c.reader.ReadByte()
+			return models.BeastStartByte, nil
+		}
+		return 0, fmt.Errorf("unexpected %02x in data (possible sync loss)", models.BeastStartByte)
+	}
+
+	return b, nil
+}
+
+// readBytesWithEscape reads n bytes, handling BeastStartByte escape sequences
+func (c *BeastClient) readBytesWithEscape(n int) ([]byte, error) {
+	data := make([]byte, 0, n)
+	for len(data) < n {
+		b, err := c.readByteWithEscape()
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, b)
+	}
+	return data, nil
+}
+
 func (c *BeastClient) readMessages(ctx context.Context, messageChan chan<- *models.BeastMessage) error {
 	for {
 		select {
@@ -109,8 +148,7 @@ func (c *BeastClient) readMessages(ctx context.Context, messageChan chan<- *mode
 				return fmt.Errorf("failed to set read deadline: %w", err)
 			}
 
-			// Look for Beast message header (0x1a 0x31)
-			header, err := c.reader.Peek(2)
+			startByte, err := c.reader.ReadByte()
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					continue // Timeout is OK, just retry
@@ -118,38 +156,106 @@ func (c *BeastClient) readMessages(ctx context.Context, messageChan chan<- *mode
 				if err == io.EOF {
 					return fmt.Errorf("connection closed")
 				}
-				return fmt.Errorf("failed to read header: %w", err)
+				return fmt.Errorf("failed to read start byte: %w", err)
 			}
 
-			// Check if we have a Beast message
-			if header[0] == 0x1a && header[1] == 0x31 {
-				// Read the full message (22 bytes: 2 header + 6 timestamp + 1 signal + 14 message)
-				message := make([]byte, 22)
-				n, err := io.ReadFull(c.reader, message)
-				if err != nil {
-					if err == io.EOF {
-						return fmt.Errorf("connection closed")
-					}
-					return fmt.Errorf("failed to read message: %w", err)
-				}
+			if startByte != models.BeastStartByte {
+				slog.Debug("Skipping byte, not a message start", "byte", startByte)
+				continue
+			}
 
-				if n == 22 {
-					beastMsg, err := models.ParseBeastMessage(message)
-					if err != nil {
-						// Log but continue
-						slog.Debug("Failed to parse Beast message", "error", err)
+			// Read type byte (should not be escaped, but handle it just in case)
+			typeByte, err := c.reader.ReadByte()
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				if err == io.EOF {
+					return fmt.Errorf("connection closed")
+				}
+				return fmt.Errorf("failed to read type byte: %w", err)
+			}
+
+			// Handle escape sequence for type byte (unlikely but possible)
+			if typeByte == models.BeastStartByte {
+				next, err := c.reader.Peek(1)
+				if err != nil {
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 						continue
 					}
-
-					select {
-					case messageChan <- beastMsg:
-					case <-ctx.Done():
-						return ctx.Err()
-					}
+					return fmt.Errorf("failed to peek after %02x in type: %w", models.BeastStartByte, err)
 				}
-			} else {
-				// Skip one byte and try again
-				c.reader.ReadByte()
+				if next[0] == models.BeastStartByte {
+					// Escaped BeastStartByte, consume it
+					c.reader.ReadByte()
+					typeByte = models.BeastStartByte
+				} else {
+					// New message start, continue
+					continue
+				}
+			}
+
+			// Determine message length based on type
+			messageDataLen, err := models.GetBeastDataLen(typeByte)
+			if err != nil {
+				slog.Debug("Unknown message type", "type", typeByte, "error", err)
+				continue
+			}
+
+			// Read timestamp
+			timestampBytes, err := c.readBytesWithEscape(models.BeastTimestampLen)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				if err == io.EOF {
+					return fmt.Errorf("connection closed")
+				}
+				return fmt.Errorf("failed to read timestamp: %w", err)
+			}
+
+			// Read signal level
+			signalBytes, err := c.readBytesWithEscape(models.BeastSignalLen)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				if err == io.EOF {
+					return fmt.Errorf("connection closed")
+				}
+				return fmt.Errorf("failed to read signal: %w", err)
+			}
+
+			// Read message data
+			messageBytes, err := c.readBytesWithEscape(messageDataLen)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				if err == io.EOF {
+					return fmt.Errorf("connection closed")
+				}
+				return fmt.Errorf("failed to read message data: %w", err)
+			}
+
+			expectedTotalLen := models.BeastHeaderLen + models.BeastTimestampLen + models.BeastSignalLen + messageDataLen
+			fullMessage := make([]byte, 0, expectedTotalLen)
+			fullMessage = append(fullMessage, models.BeastStartByte, typeByte)
+			fullMessage = append(fullMessage, timestampBytes...)
+			fullMessage = append(fullMessage, signalBytes...)
+			fullMessage = append(fullMessage, messageBytes...)
+
+			beastMsg, err := models.ParseBeastMessage(fullMessage)
+			if err != nil {
+				// Log but continue
+				slog.Debug("Failed to parse Beast message", "error", err)
+				continue
+			}
+
+			select {
+			case messageChan <- beastMsg:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 	}
@@ -169,4 +275,3 @@ func (c *BeastClient) Close() error {
 	c.closeConnection()
 	return nil
 }
-

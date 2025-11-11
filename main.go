@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"flight_trmnl/internal/config"
-	"flight_trmnl/internal/daemon"
+	"flight_trmnl/internal/dump1090"
+	"flight_trmnl/internal/models"
 )
 
 func initLogger(cfg *config.Config) {
@@ -60,36 +63,73 @@ func main() {
 
 	initLogger(cfg)
 
-	daemonCfg := daemon.Config{
-		DBPath:       cfg.DBPath,
-		BeastAddr:    cfg.BeastAddr,
-		BatchSize:    cfg.BatchSize,
-		BatchTimeout: cfg.BatchTimeout,
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Setup signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// Create and start the daemon
-	d, err := daemon.New(daemonCfg)
-	if err != nil {
-		slog.Error("Failed to create daemon", "error", err)
-		os.Exit(1)
-	}
+	messageChan := make(chan *models.BeastMessage, 1000)
+	beastClient := dump1090.NewBeastClient(cfg.BeastAddr)
 
-	if err := d.Start(); err != nil {
-		slog.Error("Failed to start daemon", "error", err)
-		os.Exit(1)
-	}
+	go func() {
+		if err := beastClient.StreamMessages(ctx, messageChan); err != nil {
+			if ctx.Err() == nil { // Only log if not cancelled
+				slog.Error("Beast streamer stopped", "error", err)
+			}
+		}
+		close(messageChan)
+	}()
+
+	// Process messages and log them
+	go func() {
+		messageCount := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-messageChan:
+				if !ok {
+					// Channel closed
+					slog.Info("Message channel closed")
+					return
+				}
+				if msg == nil {
+					continue
+				}
+
+				messageCount++
+				// Log message with detailed information
+				slog.Info("Beast message received",
+					"count", messageCount,
+					"timestamp", msg.Timestamp.Format(time.RFC3339Nano),
+					"icao", msg.ICAO,
+					"message_type", msg.MessageType,
+					"signal_level", msg.SignalLevel,
+					"message_hex", msg.Hex(),
+					"message_bytes", len(msg.Message),
+				)
+			}
+		}
+	}()
+
+	slog.Info("Starting Beast message streamer", "beast_addr", cfg.BeastAddr)
 
 	// Wait for interrupt signal
 	<-sigChan
 	slog.Info("Received interrupt signal, shutting down...")
 
-	// Stop the daemon gracefully
-	if err := d.Stop(); err != nil {
-		slog.Error("Failed to stop daemon", "error", err)
-		os.Exit(1)
+	// Cancel context to stop goroutines
+	cancel()
+
+	// Close Beast client
+	if err := beastClient.Close(); err != nil {
+		slog.Error("Error closing Beast client", "error", err)
 	}
+
+	// Give goroutines a moment to finish
+	time.Sleep(100 * time.Millisecond)
+
+	slog.Info("Shutdown complete")
 }

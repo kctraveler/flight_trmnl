@@ -18,9 +18,9 @@ func TestParseBeastMessage(t *testing.T) {
 		{
 			name: "valid Beast message",
 			data: []byte{
-				0x1a, 0x31, // Header
+				BeastStartByte, BeastTypeModeSLong, // Header
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Timestamp (6 bytes)
-				0x80,                   // Signal level
+				0x80,                                                                               // Signal level
 				0x8D, 0x48, 0x40, 0xD6, 0x20, 0x2C, 0xC3, 0x71, 0xC2, 0xD7, 0x20, 0x00, 0x00, 0x00, // Message (14 bytes)
 			},
 			wantErr: false,
@@ -30,12 +30,12 @@ func TestParseBeastMessage(t *testing.T) {
 				assert.Equal(t, uint8(0x80), msg.SignalLevel)
 				assert.NotEmpty(t, msg.ICAO)
 				assert.NotEmpty(t, msg.MessageType)
-				assert.Len(t, msg.Message, 14)
+				assert.Len(t, msg.Message, BeastDataLenModeSLong)
 			},
 		},
 		{
 			name:    "message too short",
-			data:    []byte{0x1a, 0x31},
+			data:    []byte{BeastStartByte, BeastTypeModeAC},
 			wantErr: true,
 			checkFunc: func(t *testing.T, msg *BeastMessage, err error) {
 				assert.Error(t, err)
@@ -43,12 +43,12 @@ func TestParseBeastMessage(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid header",
+			name: "invalid header - unknown type",
 			data: []byte{
-				0x1a, 0x32, // Invalid header
+				BeastStartByte, 0x99, // Unknown type byte
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x80,
-				0x8D, 0x48, 0x40, 0xD6, 0x20, 0x2C, 0xC3, 0x71, 0xC2, 0xD7, 0x20, 0x00, 0x00, 0x00,
+				0x8D, 0x48, 0x40,
 			},
 			wantErr: true,
 			checkFunc: func(t *testing.T, msg *BeastMessage, err error) {
@@ -134,14 +134,15 @@ func TestBeastMessage_Hex(t *testing.T) {
 
 func TestParseBeastMessage_Timestamp(t *testing.T) {
 	// Create a message with a specific timestamp
-	// Timestamp: milliseconds since Unix epoch
-	timestampMs := int64(1609459200000) // 2021-01-01 00:00:00 UTC
+	// Timestamp: 12 MHz clock ticks (relative to sample block start)
+	// Using 12000000 ticks = 1 second
+	timestampTicks := int64(12000000) // 1 second in 12 MHz ticks
 
 	data := []byte{
-		0x1a, 0x31, // Header
-		byte(timestampMs >> 40), byte(timestampMs >> 32), byte(timestampMs >> 24),
-		byte(timestampMs >> 16), byte(timestampMs >> 8), byte(timestampMs), // Timestamp (6 bytes)
-		0x80,                   // Signal level
+		BeastStartByte, BeastTypeModeSLong, // Header
+		byte(timestampTicks >> 40), byte(timestampTicks >> 32), byte(timestampTicks >> 24),
+		byte(timestampTicks >> 16), byte(timestampTicks >> 8), byte(timestampTicks), // Timestamp (6 bytes)
+		0x80,                                                                               // Signal level
 		0x8D, 0x48, 0x40, 0xD6, 0x20, 0x2C, 0xC3, 0x71, 0xC2, 0xD7, 0x20, 0x00, 0x00, 0x00, // Message
 	}
 
@@ -149,8 +150,7 @@ func TestParseBeastMessage_Timestamp(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, msg)
 
-	// Check that timestamp is approximately correct (within 1 second)
-	expectedTime := time.Unix(timestampMs/1000, (timestampMs%1000)*1000000)
-	assert.WithinDuration(t, expectedTime, msg.Timestamp, time.Second)
+	// Check that timestamp is parsed (it will be relative, so we just verify it's set)
+	// The timestamp should be approximately 1 second before "now" since we used 1 second worth of ticks
+	assert.WithinDuration(t, time.Now().Add(-1*time.Second), msg.Timestamp, 2*time.Second)
 }
-

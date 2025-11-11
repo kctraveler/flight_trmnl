@@ -4,6 +4,7 @@
 *.dll
 *.so
 *.dylib
+flight_trmnl
 
 # Test binary, built with `go test -c`
 *.test
