@@ -35,19 +35,23 @@ func ParseBeastMessage(data []byte) (*BeastMessage, error) {
 
 	// Check message type
 	typeByte := data[1]
+	expectedTotalLen, err := GetBeastTotalLen(typeByte)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) != expectedTotalLen {
+		return nil, fmt.Errorf("beast message length mismatch: got %d bytes, expected %d for type %02x", len(data), expectedTotalLen, typeByte)
+	}
+
 	expectedDataLen, err := GetBeastDataLen(typeByte)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check message size for type is correct
-	expectedTotalLen := BeastHeaderLen + BeastTimestampLen + BeastSignalLen + expectedDataLen
-	if len(data) != expectedTotalLen {
-		return nil, fmt.Errorf("beast message length mismatch: got %d bytes, expected %d for type %02x", len(data), expectedTotalLen, typeByte)
-	}
-
+	// FIXME This time stamp seems to be incorrect. Will need to go research the format it is provided in.
 	// Extract timestamp (BeastTimestampLen bytes, big-endian, 12 MHz clock ticks)
 	// The timestamp is a 48-bit value stored in 6 bytes as big-endian
+	// It represents time in 12 MHz clock ticks relative to the start of the sample block
 	timestampOffset := BeastHeaderLen
 	timestampBytes := data[timestampOffset : timestampOffset+BeastTimestampLen]
 
@@ -59,10 +63,10 @@ func ParseBeastMessage(data []byte) (*BeastMessage, error) {
 
 	// Convert from 12 MHz clock ticks to seconds
 	// Note: The timestamp is relative to the start of the sample block, not absolute Unix time
-	// For now, we'll use the current time as a reference, but ideally we'd track a base time
-	// Since we don't have the base time, we'll use current time as approximation
+	// We approximate by subtracting the relative time from the current time
 	// In practice, you might want to track the first timestamp and use it as a base
-	timestampSeconds := float64(timestampTicks) / 12000000.0
+	const ticksPerSecond = 12_000_000 // 12 MHz
+	timestampSeconds := float64(timestampTicks) / float64(ticksPerSecond)
 	timestamp := time.Now().Add(-time.Duration(timestampSeconds) * time.Second)
 
 	// Extract signal level (BeastSignalLen byte)

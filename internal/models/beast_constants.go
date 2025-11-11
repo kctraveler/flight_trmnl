@@ -47,6 +47,20 @@ func GetBeastDataLen(typeByte byte) (int, error) {
 	}
 }
 
+// GetBeastTotalLen returns the total message length (including header) for a given Beast type byte
+func GetBeastTotalLen(typeByte byte) (int, error) {
+	switch typeByte {
+	case BeastTypeModeAC:
+		return BeastTotalLenModeAC, nil
+	case BeastTypeModeSShort:
+		return BeastTotalLenModeSShort, nil
+	case BeastTypeModeSLong:
+		return BeastTotalLenModeSLong, nil
+	default:
+		return 0, fmt.Errorf("unknown beast message type: %02x", typeByte)
+	}
+}
+
 // IsModeS returns true if the type byte represents a Mode S message (short or long)
 func IsModeS(typeByte byte) bool {
 	return typeByte == BeastTypeModeSShort || typeByte == BeastTypeModeSLong
