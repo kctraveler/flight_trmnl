@@ -24,6 +24,8 @@ go.work
 *.swp
 *.swo
 *~
+.cursor/
+.cursorignore
 
 # OS specific files
 .DS_Store

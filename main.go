@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"flight_trmnl/internal/config"
+	"flight_trmnl/internal/database"
 	"flight_trmnl/internal/dump1090"
 	"flight_trmnl/internal/models"
 )
@@ -62,6 +63,40 @@ func main() {
 	}
 
 	initLogger(cfg)
+
+	// Initialize database
+	db, err := database.New(cfg.DBPath)
+	if err != nil {
+		slog.Error("Failed to initialize database", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	// Check if aircraft table is populated, if not load from CSV
+	populated, err := db.IsAircraftTablePopulated()
+	if err != nil {
+		slog.Error("Failed to check aircraft table", "error", err)
+		os.Exit(1)
+	}
+
+	if !populated {
+		csvPaths := []string{
+			"internal/database/datasets/aircraft-database-part1.csv",
+			"internal/database/datasets/aircraft-database-part2.csv",
+		}
+		slog.Info("Aircraft table is empty, loading from CSV files", "csv_paths", csvPaths)
+
+		// Use large batch size for efficient loading (5000 records per batch)
+		batchSize := 5000
+		if err := db.LoadAircraftFromMultipleCSV(csvPaths, batchSize); err != nil {
+			slog.Error("Failed to load aircraft from CSV", "error", err)
+			os.Exit(1)
+		}
+
+		slog.Info("Successfully loaded aircraft database from CSV")
+	} else {
+		slog.Info("Aircraft table is already populated")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
