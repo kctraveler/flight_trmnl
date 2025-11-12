@@ -12,7 +12,7 @@ import (
 
 // BeastCollectorTask collects Beast format messages and stores them in batches
 type BeastCollectorTask struct {
-	repo         database.Repository
+	repo         database.BeastMessageRepository
 	messageChan  <-chan *models.BeastMessage
 	batchSize    int
 	batchTimeout time.Duration
@@ -20,7 +20,7 @@ type BeastCollectorTask struct {
 }
 
 // NewBeastCollectorTask creates a new Beast format collector task
-func NewBeastCollectorTask(repo database.Repository, messageChan <-chan *models.BeastMessage, batchSize int, batchTimeout time.Duration) *BeastCollectorTask {
+func NewBeastCollectorTask(repo database.BeastMessageRepository, messageChan <-chan *models.BeastMessage, batchSize int, batchTimeout time.Duration) *BeastCollectorTask {
 	return &BeastCollectorTask{
 		repo:         repo,
 		messageChan:  messageChan,
@@ -62,7 +62,7 @@ func (t *BeastCollectorTask) processMessages(ctx context.Context) {
 
 	flushBatch := func() {
 		if len(batch) > 0 {
-			if err := t.repo.InsertBeastMessagesBatch(batch); err != nil {
+			if err := t.repo.InsertBatch(batch); err != nil {
 				slog.Error("Error inserting batch of messages", "batch_size", len(batch), "error", err)
 			} else {
 				slog.Info("Inserted batch of Beast messages", "batch_size", len(batch))
@@ -99,4 +99,3 @@ func (t *BeastCollectorTask) processMessages(ctx context.Context) {
 		}
 	}
 }
-

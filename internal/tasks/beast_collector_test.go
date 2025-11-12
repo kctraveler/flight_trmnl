@@ -11,13 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mockRepository is a simple mock implementation of database.Repository
+// mockRepository is a simple mock implementation of database.BeastMessageRepository
 type mockRepository struct {
 	messages []*models.BeastMessage
 	errors   []error
 }
 
-func (m *mockRepository) InsertBeastMessage(msg *models.BeastMessage) error {
+func (m *mockRepository) Insert(msg *models.BeastMessage) error {
 	m.messages = append(m.messages, msg)
 	if len(m.errors) > 0 {
 		err := m.errors[0]
@@ -27,7 +27,7 @@ func (m *mockRepository) InsertBeastMessage(msg *models.BeastMessage) error {
 	return nil
 }
 
-func (m *mockRepository) InsertBeastMessagesBatch(msgs []*models.BeastMessage) error {
+func (m *mockRepository) InsertBatch(msgs []*models.BeastMessage) error {
 	m.messages = append(m.messages, msgs...)
 	if len(m.errors) > 0 {
 		err := m.errors[0]

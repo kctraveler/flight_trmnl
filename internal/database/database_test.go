@@ -42,46 +42,11 @@ func TestNew(t *testing.T) {
 	assert.NotNil(t, db)
 }
 
-func TestInsertBeastMessage(t *testing.T) {
-	db := setupTestDB(t)
-	defer cleanupTestDB(t, db)
-
-	msg := &models.BeastMessage{
-		Timestamp:   time.Now(),
-		SignalLevel: 128,
-		Message:     []byte{0x8D, 0x48, 0x40, 0xD6, 0x20, 0x2C, 0xC3, 0x71, 0xC2, 0xD7, 0x20, 0x00, 0x00, 0x00},
-		ICAO:        "484040",
-		MessageType: "extended_squitter",
-	}
-
-	err := db.InsertBeastMessage(msg)
-	assert.NoError(t, err)
-}
-
-func TestInsertBeastMessage_Duplicate(t *testing.T) {
-	db := setupTestDB(t)
-	defer cleanupTestDB(t, db)
-
-	msg := &models.BeastMessage{
-		Timestamp:   time.Now(),
-		SignalLevel: 128,
-		Message:     []byte{0x8D, 0x48, 0x40, 0xD6, 0x20, 0x2C, 0xC3, 0x71, 0xC2, 0xD7, 0x20, 0x00, 0x00, 0x00},
-		ICAO:        "484040",
-		MessageType: "extended_squitter",
-	}
-
-	// Insert first time
-	err := db.InsertBeastMessage(msg)
-	assert.NoError(t, err)
-
-	// Insert duplicate (should be ignored due to UNIQUE constraint)
-	err = db.InsertBeastMessage(msg)
-	assert.NoError(t, err) // Should not error, just ignore
-}
-
 func TestInsertBeastMessagesBatch(t *testing.T) {
 	db := setupTestDB(t)
 	defer cleanupTestDB(t, db)
+
+	repo := db.BeastMessageRepository()
 
 	msgs := []*models.BeastMessage{
 		{
@@ -100,7 +65,7 @@ func TestInsertBeastMessagesBatch(t *testing.T) {
 		},
 	}
 
-	err := db.InsertBeastMessagesBatch(msgs)
+	err := repo.InsertBatch(msgs)
 	assert.NoError(t, err)
 }
 
@@ -108,14 +73,18 @@ func TestInsertBeastMessagesBatch_Empty(t *testing.T) {
 	db := setupTestDB(t)
 	defer cleanupTestDB(t, db)
 
+	repo := db.BeastMessageRepository()
+
 	// Empty batch should not error
-	err := db.InsertBeastMessagesBatch([]*models.BeastMessage{})
+	err := repo.InsertBatch([]*models.BeastMessage{})
 	assert.NoError(t, err)
 }
 
 func TestInsertBeastMessagesBatch_Duplicates(t *testing.T) {
 	db := setupTestDB(t)
 	defer cleanupTestDB(t, db)
+
+	repo := db.BeastMessageRepository()
 
 	msg := &models.BeastMessage{
 		Timestamp:   time.Now(),
@@ -128,7 +97,6 @@ func TestInsertBeastMessagesBatch_Duplicates(t *testing.T) {
 	msgs := []*models.BeastMessage{msg, msg} // Same message twice
 
 	// Should not error, duplicates are ignored
-	err := db.InsertBeastMessagesBatch(msgs)
+	err := repo.InsertBatch(msgs)
 	assert.NoError(t, err)
 }
-

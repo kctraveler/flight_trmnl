@@ -72,8 +72,11 @@ func main() {
 	}
 	defer db.Close()
 
+	// Get aircraft repository
+	aircraftRepo := db.AircraftRepository()
+
 	// Check if aircraft table is populated, if not load from CSV
-	populated, err := db.IsAircraftTablePopulated()
+	populated, err := aircraftRepo.IsTablePopulated()
 	if err != nil {
 		slog.Error("Failed to check aircraft table", "error", err)
 		os.Exit(1)
@@ -88,7 +91,7 @@ func main() {
 
 		// Use large batch size for efficient loading (5000 records per batch)
 		batchSize := 5000
-		if err := db.LoadAircraftFromMultipleCSV(csvPaths, batchSize); err != nil {
+		if err := aircraftRepo.LoadFromMultipleCSV(csvPaths, batchSize); err != nil {
 			slog.Error("Failed to load aircraft from CSV", "error", err)
 			os.Exit(1)
 		}
@@ -155,15 +158,12 @@ func main() {
 	<-sigChan
 	slog.Info("Received interrupt signal, shutting down...")
 
-	// Cancel context to stop goroutines
 	cancel()
 
-	// Close Beast client
 	if err := beastClient.Close(); err != nil {
 		slog.Error("Error closing Beast client", "error", err)
 	}
 
-	// Give goroutines a moment to finish
 	time.Sleep(100 * time.Millisecond)
 
 	slog.Info("Shutdown complete")

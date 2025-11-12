@@ -18,7 +18,7 @@ type Daemon struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	scheduler   *scheduler.Scheduler
-	database    database.Repository
+	database    *database.DB
 	beastClient *dump1090.BeastClient
 	messageChan chan *models.BeastMessage
 	done        chan struct{}
@@ -47,6 +47,9 @@ func New(cfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("failed to initialize database: %w", err)
 	}
 
+	// Get Beast message repository
+	beastRepo := db.BeastMessageRepository()
+
 	// Create message channel for Beast format
 	messageChan := make(chan *models.BeastMessage, 1000) // Buffered channel
 
@@ -67,7 +70,7 @@ func New(cfg Config) (*Daemon, error) {
 	}
 
 	// Create Beast collector task
-	beastCollector := tasks.NewBeastCollectorTask(db, messageChan, batchSize, batchTimeout)
+	beastCollector := tasks.NewBeastCollectorTask(beastRepo, messageChan, batchSize, batchTimeout)
 	sched.AddTask(beastCollector)
 
 	// Start Beast message streamer in background
