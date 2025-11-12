@@ -13,6 +13,7 @@ import (
 	"flight_trmnl/internal/database"
 	"flight_trmnl/internal/dump1090"
 	"flight_trmnl/internal/models"
+	"flight_trmnl/internal/tasks"
 )
 
 func initLogger(cfg *config.Config) {
@@ -72,16 +73,16 @@ func main() {
 	}
 	defer db.Close()
 
-	// Get aircraft repository
-	aircraftRepo := db.AircraftRepository()
+	// Setup beast message repository
+	beastRepo := db.BeastMessageRepository()
 
-	// Check if aircraft table is populated, if not load from CSV
+	// Setup aircraft repository
+	aircraftRepo := db.AircraftRepository()
 	populated, err := aircraftRepo.IsTablePopulated()
 	if err != nil {
 		slog.Error("Failed to check aircraft table", "error", err)
 		os.Exit(1)
 	}
-
 	if !populated {
 		csvPaths := []string{
 			"internal/database/datasets/aircraft-database-part1.csv",
@@ -89,13 +90,11 @@ func main() {
 		}
 		slog.Info("Aircraft table is empty, loading from CSV files", "csv_paths", csvPaths)
 
-		// Use large batch size for efficient loading (5000 records per batch)
-		batchSize := 5000
+		batchSize := 5000 // large batch size for efficient loading expect > 500,000 records
 		if err := aircraftRepo.LoadFromMultipleCSV(csvPaths, batchSize); err != nil {
 			slog.Error("Failed to load aircraft from CSV", "error", err)
 			os.Exit(1)
 		}
-
 		slog.Info("Successfully loaded aircraft database from CSV")
 	} else {
 		slog.Info("Aircraft table is already populated")
@@ -104,13 +103,13 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Setup signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	messageChan := make(chan *models.BeastMessage, 1000)
+	messageChan := make(chan *models.BeastMessage, 1000) // buffered channel for high message rate (~200/sec)
 	beastClient := dump1090.NewBeastClient(cfg.BeastAddr)
 
+	slog.Info("Starting Beast message collector", "beast_addr", cfg.BeastAddr)
 	go func() {
 		if err := beastClient.StreamMessages(ctx, messageChan); err != nil {
 			if ctx.Err() == nil { // Only log if not cancelled
@@ -120,39 +119,13 @@ func main() {
 		close(messageChan)
 	}()
 
-	// Process messages and log them
+	// Start collector to batch and store messages in database
+	collector := tasks.NewBeastCollector(beastRepo, messageChan)
 	go func() {
-		messageCount := 0
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case msg, ok := <-messageChan:
-				if !ok {
-					// Channel closed
-					slog.Info("Message channel closed")
-					return
-				}
-				if msg == nil {
-					continue
-				}
-
-				messageCount++
-				// Log message with detailed information
-				slog.Info("Beast message received",
-					"count", messageCount,
-					"timestamp", msg.Timestamp.Format(time.RFC3339Nano),
-					"icao", msg.ICAO,
-					"message_type", msg.MessageType,
-					"signal_level", msg.SignalLevel,
-					"message_hex", msg.Hex(),
-					"message_bytes", len(msg.Message),
-				)
-			}
+		if err := collector.Start(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("Beast collector stopped", "error", err)
 		}
 	}()
-
-	slog.Info("Starting Beast message streamer", "beast_addr", cfg.BeastAddr)
 
 	// Wait for interrupt signal
 	<-sigChan
@@ -164,7 +137,8 @@ func main() {
 		slog.Error("Error closing Beast client", "error", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	// Give collector time to flush final batch
+	time.Sleep(500 * time.Millisecond)
 
 	slog.Info("Shutdown complete")
 }

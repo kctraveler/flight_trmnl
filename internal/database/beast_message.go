@@ -32,7 +32,7 @@ func (r *beastMessageRepository) InsertBatch(msgs []*models.BeastMessage) error 
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO beast_messages (
+	stmt, err := tx.Prepare(`INSERT INTO beast_messages (
 		timestamp, icao, message_type, signal_level, message_hex
 	) VALUES (?, ?, ?, ?, ?)`)
 	if err != nil {

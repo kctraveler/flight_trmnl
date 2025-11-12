@@ -17,16 +17,6 @@ type mockRepository struct {
 	errors   []error
 }
 
-func (m *mockRepository) Insert(msg *models.BeastMessage) error {
-	m.messages = append(m.messages, msg)
-	if len(m.errors) > 0 {
-		err := m.errors[0]
-		m.errors = m.errors[1:]
-		return err
-	}
-	return nil
-}
-
 func (m *mockRepository) InsertBatch(msgs []*models.BeastMessage) error {
 	m.messages = append(m.messages, msgs...)
 	if len(m.errors) > 0 {
@@ -37,37 +27,44 @@ func (m *mockRepository) InsertBatch(msgs []*models.BeastMessage) error {
 	return nil
 }
 
-func (m *mockRepository) Close() error {
-	return nil
-}
-
-func TestNewBeastCollectorTask(t *testing.T) {
+func TestNewBeastCollector(t *testing.T) {
 	repo := &mockRepository{}
 	messageChan := make(chan *models.BeastMessage, 10)
-	batchSize := 10
-	batchTimeout := 1 * time.Second
 
-	task := NewBeastCollectorTask(repo, messageChan, batchSize, batchTimeout)
+	collector := NewBeastCollector(repo, messageChan)
 
-	require.NotNil(t, task)
-	assert.Equal(t, "BeastCollector", task.Name())
-	assert.Equal(t, 1*time.Second, task.Interval())
+	require.NotNil(t, collector)
+	assert.Equal(t, 100, collector.batchSize)
+	assert.Equal(t, 1*time.Second, collector.flushInterval)
 }
 
-func TestBeastCollectorTask_BatchFlush(t *testing.T) {
+func TestNewBeastCollectorWithConfig(t *testing.T) {
+	repo := &mockRepository{}
+	messageChan := make(chan *models.BeastMessage, 10)
+	batchSize := 50
+	flushInterval := 500 * time.Millisecond
+
+	collector := NewBeastCollectorWithConfig(repo, messageChan, batchSize, flushInterval)
+
+	require.NotNil(t, collector)
+	assert.Equal(t, batchSize, collector.batchSize)
+	assert.Equal(t, flushInterval, collector.flushInterval)
+}
+
+func TestBeastCollector_BatchFlush(t *testing.T) {
 	repo := &mockRepository{}
 	messageChan := make(chan *models.BeastMessage, 100)
 	batchSize := 5
-	batchTimeout := 100 * time.Millisecond
+	flushInterval := 100 * time.Millisecond
 
-	task := NewBeastCollectorTask(repo, messageChan, batchSize, batchTimeout)
+	collector := NewBeastCollectorWithConfig(repo, messageChan, batchSize, flushInterval)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start the task in a goroutine
+	// Start the collector in a goroutine
 	go func() {
-		_ = task.Run(ctx)
+		_ = collector.Start(ctx)
 	}()
 
 	// Send messages that should trigger a batch flush
@@ -86,50 +83,61 @@ func TestBeastCollectorTask_BatchFlush(t *testing.T) {
 	assert.GreaterOrEqual(t, len(repo.messages), batchSize)
 }
 
-func TestBeastCollectorTask_TimeoutFlush(t *testing.T) {
+func TestBeastCollector_TimeoutFlush(t *testing.T) {
 	repo := &mockRepository{}
 	messageChan := make(chan *models.BeastMessage, 100)
 	batchSize := 10
-	batchTimeout := 100 * time.Millisecond
+	flushInterval := 100 * time.Millisecond
 
-	task := NewBeastCollectorTask(repo, messageChan, batchSize, batchTimeout)
+	collector := NewBeastCollectorWithConfig(repo, messageChan, batchSize, flushInterval)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start the task in a goroutine
+	// Start the collector in a goroutine
 	go func() {
-		_ = task.Run(ctx)
+		_ = collector.Start(ctx)
 	}()
 
-	// Send fewer messages than batch size
-	msg := &models.BeastMessage{
+	// Send first message (starts the batch)
+	msg1 := &models.BeastMessage{
 		ICAO:        "TEST01",
 		MessageType: "test",
 	}
-	messageChan <- msg
+	messageChan <- msg1
 
-	// Wait for timeout
-	time.Sleep(200 * time.Millisecond)
+	// Wait for flush interval to pass
+	time.Sleep(flushInterval + 50*time.Millisecond)
 
-	// Check that message was inserted (timeout flush)
-	assert.GreaterOrEqual(t, len(repo.messages), 1)
+	// Send a second message to trigger the timeout check
+	// This will cause the collector to check time.Since(lastFlushTime) and flush
+	msg2 := &models.BeastMessage{
+		ICAO:        "TEST02",
+		MessageType: "test",
+	}
+	messageChan <- msg2
+
+	// Wait a bit for the flush to complete
+	time.Sleep(50 * time.Millisecond)
+
+	// Check that both messages were inserted (timeout flush should have triggered)
+	assert.GreaterOrEqual(t, len(repo.messages), 2)
 }
 
-func TestBeastCollectorTask_ContextCancellation(t *testing.T) {
+func TestBeastCollector_ContextCancellation(t *testing.T) {
 	repo := &mockRepository{}
 	messageChan := make(chan *models.BeastMessage, 100)
 	batchSize := 10
-	batchTimeout := 1 * time.Second
+	flushInterval := 1 * time.Second
 
-	task := NewBeastCollectorTask(repo, messageChan, batchSize, batchTimeout)
+	collector := NewBeastCollectorWithConfig(repo, messageChan, batchSize, flushInterval)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Start the task in a goroutine
+	// Start the collector in a goroutine
 	done := make(chan struct{})
 	go func() {
-		_ = task.Run(ctx)
+		_ = collector.Start(ctx)
 		close(done)
 	}()
 
@@ -140,34 +148,37 @@ func TestBeastCollectorTask_ContextCancellation(t *testing.T) {
 	}
 	messageChan <- msg
 
+	// Give collector time to process the message
+	time.Sleep(50 * time.Millisecond)
+
 	// Cancel context
 	cancel()
 
-	// Wait for task to finish
+	// Wait for collector to finish
 	select {
 	case <-done:
-		// Task should have flushed remaining messages and exited
+		// Collector should have flushed remaining messages and exited
 		assert.GreaterOrEqual(t, len(repo.messages), 1)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Task did not exit after context cancellation")
+		t.Fatal("Collector did not exit after context cancellation")
 	}
 }
 
-func TestBeastCollectorTask_ChannelClosed(t *testing.T) {
+func TestBeastCollector_ChannelClosed(t *testing.T) {
 	repo := &mockRepository{}
 	messageChan := make(chan *models.BeastMessage, 100)
 	batchSize := 10
-	batchTimeout := 1 * time.Second
+	flushInterval := 1 * time.Second
 
-	task := NewBeastCollectorTask(repo, messageChan, batchSize, batchTimeout)
+	collector := NewBeastCollectorWithConfig(repo, messageChan, batchSize, flushInterval)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start the task in a goroutine
+	// Start the collector in a goroutine
 	done := make(chan struct{})
 	go func() {
-		_ = task.Run(ctx)
+		_ = collector.Start(ctx)
 		close(done)
 	}()
 
@@ -181,32 +192,32 @@ func TestBeastCollectorTask_ChannelClosed(t *testing.T) {
 	// Close channel
 	close(messageChan)
 
-	// Wait for task to finish
+	// Wait for collector to finish
 	select {
 	case <-done:
-		// Task should have flushed remaining messages and exited
+		// Collector should have flushed remaining messages and exited
 		assert.GreaterOrEqual(t, len(repo.messages), 1)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Task did not exit after channel closed")
+		t.Fatal("Collector did not exit after channel closed")
 	}
 }
 
-func TestBeastCollectorTask_InsertError(t *testing.T) {
+func TestBeastCollector_InsertError(t *testing.T) {
 	repo := &mockRepository{
 		errors: []error{assert.AnError},
 	}
 	messageChan := make(chan *models.BeastMessage, 100)
 	batchSize := 5
-	batchTimeout := 100 * time.Millisecond
+	flushInterval := 100 * time.Millisecond
 
-	task := NewBeastCollectorTask(repo, messageChan, batchSize, batchTimeout)
+	collector := NewBeastCollectorWithConfig(repo, messageChan, batchSize, flushInterval)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start the task in a goroutine
+	// Start the collector in a goroutine
 	go func() {
-		_ = task.Run(ctx)
+		_ = collector.Start(ctx)
 	}()
 
 	// Send messages that should trigger a batch flush
@@ -221,8 +232,7 @@ func TestBeastCollectorTask_InsertError(t *testing.T) {
 	// Wait a bit for batch to be flushed
 	time.Sleep(200 * time.Millisecond)
 
-	// Task should continue running despite error
+	// Collector should continue running despite error
 	// Messages should still be in the mock (even though insert failed)
 	assert.GreaterOrEqual(t, len(repo.messages), batchSize)
 }
-

@@ -3,99 +3,103 @@ package tasks
 import (
 	"context"
 	"log/slog"
-	"sync"
 	"time"
 
 	"flight_trmnl/internal/database"
 	"flight_trmnl/internal/models"
 )
 
-// BeastCollectorTask collects Beast format messages and stores them in batches
-type BeastCollectorTask struct {
-	repo         database.BeastMessageRepository
-	messageChan  <-chan *models.BeastMessage
-	batchSize    int
-	batchTimeout time.Duration
-	interval     time.Duration
+// BeastCollector collects Beast format messages and commits them to the database in batches
+type BeastCollector struct {
+	repo          database.BeastMessageRepository
+	messageChan   <-chan *models.BeastMessage
+	batchSize     int           // maximum number of messages in a batch before committing to database
+	flushInterval time.Duration // time to flush batch even if not full
 }
 
-// NewBeastCollectorTask creates a new Beast format collector task
-func NewBeastCollectorTask(repo database.BeastMessageRepository, messageChan <-chan *models.BeastMessage, batchSize int, batchTimeout time.Duration) *BeastCollectorTask {
-	return &BeastCollectorTask{
-		repo:         repo,
-		messageChan:  messageChan,
-		batchSize:    batchSize,
-		batchTimeout: batchTimeout,
-		interval:     1 * time.Second, // Not used for streaming, but required by interface
+// Default batch size is 100 messages and flush interval is 1 second
+func NewBeastCollector(repo database.BeastMessageRepository, messageChan <-chan *models.BeastMessage) *BeastCollector {
+	return &BeastCollector{
+		repo:          repo,
+		messageChan:   messageChan,
+		batchSize:     100,
+		flushInterval: 1 * time.Second,
 	}
 }
 
-// Name returns the task name
-func (t *BeastCollectorTask) Name() string {
-	return "BeastCollector"
+// NewBeastCollectorWithConfig creates a new Beast format collector with custom batch settings
+func NewBeastCollectorWithConfig(repo database.BeastMessageRepository, messageChan <-chan *models.BeastMessage, batchSize int, flushInterval time.Duration) *BeastCollector {
+	return &BeastCollector{
+		repo:          repo,
+		messageChan:   messageChan,
+		batchSize:     batchSize,
+		flushInterval: flushInterval,
+	}
 }
 
-// Interval returns the task execution interval (not used for streaming)
-func (t *BeastCollectorTask) Interval() time.Duration {
-	return t.interval
-}
-
-// Run processes Beast messages in batches for efficient database writes
-func (t *BeastCollectorTask) Run(ctx context.Context) error {
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-		t.processMessages(ctx)
-	}()
-
-	wg.Wait()
-	return nil
-}
-
-// processMessages collects messages and writes them in batches
-func (t *BeastCollectorTask) processMessages(ctx context.Context) {
-	batch := make([]*models.BeastMessage, 0, t.batchSize)
-	ticker := time.NewTicker(t.batchTimeout)
-	defer ticker.Stop()
+// Start begins collecting messages and writing them to the database in batches
+// This method blocks until the context is cancelled or the message channel is closed
+// Batches are flushed when they reach batchSize (100) or 1 second has passed since the last transaction
+func (c *BeastCollector) Start(ctx context.Context) error {
+	batch := make([]*models.BeastMessage, 0, c.batchSize)
+	var lastFlushTime time.Time
 
 	flushBatch := func() {
 		if len(batch) > 0 {
-			if err := t.repo.InsertBatch(batch); err != nil {
+			if err := c.repo.InsertBatch(batch); err != nil {
 				slog.Error("Error inserting batch of messages", "batch_size", len(batch), "error", err)
 			} else {
-				slog.Info("Inserted batch of Beast messages", "batch_size", len(batch))
+				lastFlushTime = time.Now()
+				slog.Info("Inserted batch of Beast messages",
+					"batch_size", len(batch),
+				)
 			}
 			batch = batch[:0] // Reset slice but keep capacity
 		}
 	}
+
+	// Initialize lastFlushTime to now so first message doesn't immediately flush
+	lastFlushTime = time.Now()
 
 	for {
 		select {
 		case <-ctx.Done():
 			// Flush any remaining messages before exiting
 			flushBatch()
-			return
+			return ctx.Err()
 
-		case msg := <-t.messageChan:
-			if msg == nil {
-				// Channel closed
+		case msg, ok := <-c.messageChan:
+			if !ok {
+				// Channel closed, flush any remaining messages
 				flushBatch()
-				return
+				return nil
+			}
+
+			if msg == nil {
+				continue
 			}
 
 			batch = append(batch, msg)
 
-			// Flush when batch is full
-			if len(batch) >= t.batchSize {
-				flushBatch()
-				ticker.Reset(t.batchTimeout) // Reset timer
-			}
+			// Log debug information about the message and batch
+			slog.Debug("Added message to batch",
+				"icao", msg.ICAO,
+				"message_type", msg.MessageType,
+				"signal_level", msg.SignalLevel,
+				"timestamp", msg.Timestamp.Format(time.RFC3339Nano),
+				"current_batch_size", len(batch),
+				"max_batch_size", c.batchSize,
+			)
 
-		case <-ticker.C:
-			// Flush periodically even if batch isn't full
-			flushBatch()
+			// Flush when batch is full
+			if len(batch) >= c.batchSize {
+				flushBatch()
+			} else {
+				// Check if 1 second has passed since last transaction
+				if time.Since(lastFlushTime) >= c.flushInterval {
+					flushBatch()
+				}
+			}
 		}
 	}
 }

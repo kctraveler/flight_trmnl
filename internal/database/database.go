@@ -101,8 +101,7 @@ func (d *DB) initSchema() error {
 		message_type TEXT,
 		signal_level INTEGER,
 		message_hex TEXT NOT NULL,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		UNIQUE(icao, timestamp, message_hex)
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);`
 
 	aircraftSchema := `CREATE TABLE IF NOT EXISTS aircraft (
